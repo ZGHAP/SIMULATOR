@@ -1,0 +1,3 @@
+session_id,instrument,timeframe,bar_index,timestamp,action,position_before,position_after,price_reference,setup_label,reason_label,quality,note,key_used
+593e14b7d101,RB99,1m,10,2019-04-12 21:10:00,long,0,1,3814.0,,trend_resume,,,UP
+593e14b7d101,RB99,1m,11,2019-04-12 21:11:00,skip,1,1,3819.0,,too_extended,,,RIGHT
