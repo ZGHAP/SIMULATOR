@@ -541,7 +541,7 @@ pre{white-space:pre-wrap;word-break:break-word}
 <body>
 <div id="left"><canvas id="cv" width="1200" height="760"></canvas></div>
 <div id="right">
-<div><span class="btn">Ctrl+click select bar</span><span class="btn" style="color:#37d67a">↑ flag long break</span><span class="btn" style="color:#ff5c5c">↓ flag short break</span><span class="btn">← flat</span><span class="btn">→ skip</span><span class="btn" style="color:#4fc3f7">Ctrl+↑/↓ BO current bar</span><span class="btn">Shift/Esc cancel flag</span></div>
+<div><span class="btn">Ctrl+click select bar</span><span class="btn" style="color:#37d67a">↑ flag long break</span><span class="btn" style="color:#ff5c5c">↓ flag short break</span><span class="btn">← flat</span><span class="btn">→ skip</span><span class="btn" style="color:#4fc3f7">Ctrl+↑/↓ BO current bar</span><span class="btn">Q/Shift cancel flag or flat</span><span class="btn">Esc cancel flag only</span></div>
 <h3 id="title"></h3>
 <div><span class="k">Position:</span> <span id="pos" class="v"></span></div>
 <div><span class="k">Open PnL:</span> <span id="pnl" class="v"></span></div>
@@ -582,7 +582,7 @@ cv.addEventListener('click',(e)=>{
     +'<div style="flex:1;padding:7px 6px;background:#1a3328;color:#37d67a;border:1px solid #37d67a55;border-radius:5px;font-size:13px;text-align:center"><div>▲ Long break</div><div style="font-size:10px;color:#6db;margin-top:2px">@ '+boL+'</div><div style="font-size:10px;color:#4a8;margin-top:3px;font-weight:bold">press ↑</div></div>'
     +'<div style="flex:1;padding:7px 6px;background:#331a1a;color:#ff5c5c;border:1px solid #ff5c5c55;border-radius:5px;font-size:13px;text-align:center"><div>▼ Short break</div><div style="font-size:10px;color:#d88;margin-top:2px">@ '+boS+'</div><div style="font-size:10px;color:#a44;margin-top:3px;font-weight:bold">press ↓</div></div>'
     +'</div>'
-    +'<div style="color:#555;font-size:10px;text-align:center">Shift / Esc to cancel</div>';
+    +'<div style="color:#555;font-size:10px;text-align:center">Q / Shift to cancel &nbsp;|&nbsp; Esc to dismiss</div>';
   document.body.appendChild(d); flagPopup=d;
 });
 document.addEventListener('click',(e)=>{ if(flagPopup&&!flagPopup.contains(e.target)&&!e.ctrlKey) removeFlagPopup(); });
@@ -620,7 +620,7 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
    return `${ts} ${side}${price}${note}`;
  }).join('\n');
  }
- window.addEventListener('keydown', (e)=>{ if(e.key==='q'||e.key==='Q'){removeFlagPopup(); pendingFlagBar=null; act('q'); return;} if(e.key==='Escape'||e.key==='Shift'){removeFlagPopup(); pendingFlagBar=null; return;} if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault(); if(e.ctrlKey&&e.key==='ArrowUp'){act('breakout_long')} else if(e.ctrlKey&&e.key==='ArrowDown'){act('breakout_short')} else if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')} else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')} else if(e.key==='ArrowLeft'){act('flat')} else if(e.key==='ArrowRight'){act('skip')}} });
+ window.addEventListener('keydown', (e)=>{ if(e.key==='q'||e.key==='Q'){removeFlagPopup(); pendingFlagBar=null; act('q'); return;} if(e.key==='Escape'){removeFlagPopup(); pendingFlagBar=null; return;} if(e.key==='Shift'){removeFlagPopup(); pendingFlagBar=null; act('q'); return;} if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault(); if(e.ctrlKey&&e.key==='ArrowUp'){act('breakout_long')} else if(e.ctrlKey&&e.key==='ArrowDown'){act('breakout_short')} else if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')} else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')} else if(e.key==='ArrowLeft'){act('flat')} else if(e.key==='ArrowRight'){act('skip')}} });
  load();
 </script></body></html>'''
 
