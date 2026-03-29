@@ -273,9 +273,10 @@ class ReplayStore:
             self.save()
             return self.view()
 
-        # Block new entries on session close bars.
-        if action in {"long", "short", "breakout_long", "breakout_short"} and self._is_session_close_bar(row):
-            action = "skip"
+        # Cancel all pending orders on session close bar regardless of action.
+        if self._is_session_close_bar(row):
+            self._flag_order = None
+            self._flag_ready = None
 
         if action == "breakout_long":
             # Set pending order: fill only when a future bar's high >= current bar's high + 2t
@@ -341,6 +342,9 @@ class ReplayStore:
             key_used=action.upper(),
         )
         self.state.actions.append(sim_action)
+        # If entry was made on a session close bar, immediately force-unwind at close.
+        if action in {"long", "short"} and self._is_session_close_bar(row):
+            self._apply_forced_session_flat(i, row)
         # Only advance the bar on skip (right arrow); all other actions stay on current bar.
         if action == "skip":
             self.state.current_index = min(i + 1, len(self.df))
@@ -397,16 +401,18 @@ class ReplayStore:
         return None
 
     def _apply_forced_session_flat(self, i: int, row: Any) -> str | None:
-        p = self.state.position
-        if p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
-            return None
         hhmm = str(row.get("date", ""))[11:16]
         if hhmm not in {"14:45", "02:15"}:
+            return None
+        # Cancel all pending orders at session close regardless of position.
+        self._flag_order = None
+        self._flag_ready = None
+        p = self.state.position
+        if p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
             return None
         exit_price = float(row["close"])
         note = f"forced flat at session close bar {hhmm} @ close {exit_price:g}"
         self._close_trade(i, row, exit_price=exit_price, exit_reason_label="forced_session_flat_close", exit_note=note)
-        self._flag_order = None  # cancel any pending flag across session boundary
         return f"auto flat: session close {hhmm} @ close {exit_price:g}"
 
     def _close_trade(self, i: int, row: Any, exit_price: float | None = None, exit_reason_label: str | None = None, exit_note: str | None = None) -> None:
