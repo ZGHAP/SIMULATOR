@@ -287,31 +287,16 @@ class ReplayStore:
         price = float(row["close"])
         timestamp = str(row["date"])
 
-        # Handle Q before auto-stop so user can always manually exit.
+        # Q: cancel pending flag (first press) or unwind position (second press).
+        # Cancel flag before auto-stop runs so it doesn't interfere.
         if action == "q":
             if self._flag_order is not None:
-                # First press: cancel pending order only.
                 self._flag_order = None
                 self._flag_ready = None
                 self.save()
                 return self.view()
-            if self.state.position.side != 0:
-                # Second press (or Q with no flag): unwind position at close price.
-                before_q = self.state.position.side
-                exit_price = float(row["close"])
-                self._close_trade(i, row, exit_price=exit_price, exit_reason_label="manual_flat_q")
-                self.state.actions.append(SimAction(
-                    session_id=self.state.session_id, instrument=self.instrument,
-                    timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
-                    action="flat", position_before=before_q, position_after=0,
-                    price_reference=exit_price, setup_label=None, reason_label=None,
-                    quality=None, note="q key unwind", key_used="Q",
-                ))
-                self._needs_full_save = True
-                self.save(force=True)
-                return self.view()
-            # Nothing to do (no flag, no position).
-            return self.view()
+            # No flag — fall through as "flat" so it uses the same fast path as left arrow.
+            action = "flat"
 
         stop_note = self._apply_hard_stop(i, row)
         if not stop_note:
