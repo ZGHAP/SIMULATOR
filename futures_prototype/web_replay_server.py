@@ -82,8 +82,30 @@ class ReplayStore:
         if not raw:
             return
         payload = json.loads(raw)
+        sid = payload.get("session_id") or self.state.session_id
+        # Reload actions and trades from their CSV files (state.json no longer stores them).
+        actions: list[SimAction] = []
+        trades: list[SimTrade] = []
+        actions_path = self.out_dir / f"{self.instrument}_{sid}_actions.csv"
+        trades_path  = self.out_dir / f"{self.instrument}_{sid}_trades.csv"
+        if actions_path.exists() and actions_path.stat().st_size > 0:
+            import csv as _csv
+            with actions_path.open(newline="", encoding="utf-8") as f:
+                for row in _csv.DictReader(f):
+                    try:
+                        actions.append(SimAction(**{k: (None if v == "" else v) for k, v in row.items()}))
+                    except Exception:
+                        pass
+        if trades_path.exists() and trades_path.stat().st_size > 0:
+            import csv as _csv
+            with trades_path.open(newline="", encoding="utf-8") as f:
+                for row in _csv.DictReader(f):
+                    try:
+                        trades.append(SimTrade(**{k: (None if v == "" else v) for k, v in row.items()}))
+                    except Exception:
+                        pass
         self.state = ReplayState(
-            session_id=payload.get("session_id") or self.state.session_id,
+            session_id=sid,
             instrument=payload.get("instrument") or self.instrument,
             timeframe=payload.get("timeframe") or self.timeframe,
             input_path=payload.get("input_path") or self.input_path,
@@ -92,10 +114,13 @@ class ReplayStore:
             position_size=int(payload.get("position_size", self.position_size)),
             current_index=int(payload.get("current_index", 0)),
             position=SimPosition(**payload.get("position", {})),
-            actions=[SimAction(**x) for x in payload.get("actions", [])],
-            trades=[SimTrade(**x) for x in payload.get("trades", [])],
-            snapshots=payload.get("snapshots", []),
+            actions=actions,
+            trades=trades,
+            snapshots=[],
         )
+        # Sync flush counters so _append_csv knows what's already written.
+        setattr(self, f"_flushed_{actions_path.stem}", len(actions))
+        setattr(self, f"_flushed_{trades_path.stem}", len(trades))
 
     def save(self) -> dict[str, str]:
         actions_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_actions.csv"
@@ -103,24 +128,13 @@ class ReplayStore:
         snapshots_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_snapshots.jsonl"
         summary_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_summary.json"
 
-        self._write_csv(actions_path, [asdict(x) for x in self.state.actions])
-        self._write_csv(trades_path, [asdict(x) for x in self.state.trades])
-        # Lightweight mode: do not persist full snapshots during long replay runs.
+        # Append only the last action/trade rather than rewriting the full list each time.
+        self._append_csv(actions_path, self.state.actions)
+        self._append_csv(trades_path, self.state.trades)
         if snapshots_path.exists():
             snapshots_path.unlink()
-        summary_path.write_text(json.dumps({
-            "session_id": self.state.session_id,
-            "instrument": self.instrument,
-            "timeframe": self.timeframe,
-            "actions": len(self.state.actions),
-            "trades": len(self.state.trades),
-            "lookback": self.lookback,
-            "current_index": self.state.current_index,
-            "open_position": asdict(self.state.position),
-            "input_path": self.input_path,
-            "state_path": str(self.state_path),
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
 
+        # State JSON: store only lightweight checkpoint (no full action/trade lists).
         payload = {
             "session_id": self.state.session_id,
             "instrument": self.instrument,
@@ -131,11 +145,15 @@ class ReplayStore:
             "tick_size": self.state.tick_size,
             "position_size": self.state.position_size,
             "position": asdict(self.state.position),
-            "actions": [asdict(x) for x in self.state.actions],
-            "trades": [asdict(x) for x in self.state.trades],
-            "snapshots": [],
+            "actions_count": len(self.state.actions),
+            "trades_count": len(self.state.trades),
         }
         self.state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        summary_path.write_text(json.dumps({
+            **payload,
+            "open_position": asdict(self.state.position),
+            "state_path": str(self.state_path),
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
         return {
             "actions": str(actions_path),
             "trades": str(trades_path),
@@ -465,6 +483,24 @@ class ReplayStore:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
+
+    def _append_csv(self, path: Path, records: list) -> None:
+        """Append only new records since last save, using in-memory flush counter."""
+        flush_attr = f"_flushed_{path.stem}"
+        flushed = getattr(self, flush_attr, 0)
+        new_records = records[flushed:]
+        if not new_records:
+            return
+        rows = [asdict(r) for r in new_records]
+        write_header = not path.exists() or flushed == 0
+        with path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            if write_header:
+                f.seek(0, 2)  # seek to end
+                if f.tell() == 0:
+                    writer.writeheader()
+            writer.writerows(rows)
+        setattr(self, flush_attr, len(records))
 
 
 INDEX_HTML = r'''<!doctype html>
