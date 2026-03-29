@@ -287,6 +287,32 @@ class ReplayStore:
         price = float(row["close"])
         timestamp = str(row["date"])
 
+        # Handle Q before auto-stop so user can always manually exit.
+        if action == "q":
+            if self._flag_order is not None:
+                # First press: cancel pending order only.
+                self._flag_order = None
+                self._flag_ready = None
+                self.save()
+                return self.view()
+            if self.state.position.side != 0:
+                # Second press (or Q with no flag): unwind position at close price.
+                before_q = self.state.position.side
+                exit_price = float(row["close"])
+                self._close_trade(i, row, exit_price=exit_price, exit_reason_label="manual_flat_q")
+                self.state.actions.append(SimAction(
+                    session_id=self.state.session_id, instrument=self.instrument,
+                    timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
+                    action="flat", position_before=before_q, position_after=0,
+                    price_reference=exit_price, setup_label=None, reason_label=None,
+                    quality=None, note="q key unwind", key_used="Q",
+                ))
+                self._needs_full_save = True
+                self.save(force=True)
+                return self.view()
+            # Nothing to do (no flag, no position).
+            return self.view()
+
         stop_note = self._apply_hard_stop(i, row)
         if not stop_note:
             self._apply_flag_breakout(i, row)
@@ -297,28 +323,6 @@ class ReplayStore:
             self._flag_order = None
             self.save()
             return self.view()
-
-        if action == "q":
-            if self._flag_order is not None:
-                # Pending order exists — cancel it only, leave position untouched.
-                self._flag_order = None
-                self._flag_ready = None
-                self.save()
-                return self.view()
-            # Unwind position regardless — read position again in case flag auto-filled above.
-            if self.state.position.side != 0:
-                exit_price = float(row["close"])
-                self._close_trade(i, row, exit_price=exit_price, exit_reason_label="manual_flat_q")
-                self.state.actions.append(SimAction(
-                    session_id=self.state.session_id, instrument=self.instrument,
-                    timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
-                    action="flat", position_before=before, position_after=0,
-                    price_reference=exit_price, setup_label=None, reason_label=None,
-                    quality=None, note="q key unwind", key_used="Q",
-                ))
-                self._needs_full_save = True
-                self.save(force=True)
-                return self.view()
 
         # Cancel all pending orders on session close bar regardless of action.
         if self._is_session_close_bar(row):
@@ -598,7 +602,14 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  document.getElementById('idx').textContent=`${state.index}/${state.total-1} ${b.date}`;
  document.getElementById('autoStop').textContent=state.autoStopNote||'-';
  document.getElementById('autoFlat').textContent=state.autoFlatNote||'-';
- document.getElementById('actions').textContent=(state.recentActions||[]).map(a=>`${a.bar_index} ${a.timestamp} ${a.action} ${a.position_before}->${a.position_after}${a.note?` | ${a.note}`:''}`).join('\n');
+ document.getElementById('actions').textContent=(state.recentActions||[]).slice().reverse().map(a=>{
+   const side=a.position_after>0?'▲LONG':a.position_after<0?'▼SHORT':'FLAT';
+   const dir=a.position_after>0?'L':a.position_after<0?'S':'—';
+   const price=a.price_reference!=null?(' @ '+parseFloat(a.price_reference).toFixed(0)):'';
+   const note=a.note?(' | '+a.note):'';
+   const ts=(a.timestamp||'').slice(5,16);
+   return `${ts} ${side}${price}${note}`;
+ }).join('\n');
  }
  window.addEventListener('keydown', (e)=>{ if(e.key==='q'||e.key==='Q'){removeFlagPopup(); pendingFlagBar=null; act('q'); return;} if(e.key==='Escape'||e.key==='Shift'){removeFlagPopup(); pendingFlagBar=null; return;} if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault(); if(e.ctrlKey&&e.key==='ArrowUp'){act('breakout_long')} else if(e.ctrlKey&&e.key==='ArrowDown'){act('breakout_short')} else if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')} else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')} else if(e.key==='ArrowLeft'){act('flat')} else if(e.key==='ArrowRight'){act('skip')}} });
  load();
