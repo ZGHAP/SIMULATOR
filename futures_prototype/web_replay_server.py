@@ -298,6 +298,26 @@ class ReplayStore:
             self.save()
             return self.view()
 
+        if action == "q":
+            if self._flag_order is not None:
+                # Pending order exists — cancel it only, leave position untouched.
+                self._flag_order = None
+                self._flag_ready = None
+                self.save()
+                return self.view()
+            elif self.state.position.side != 0:
+                # No pending order but have position — unwind at close.
+                self._close_trade(i, row)
+                self.state.actions.append(SimAction(
+                    session_id=self.state.session_id, instrument=self.instrument,
+                    timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
+                    action="flat", position_before=before, position_after=0,
+                    price_reference=price, setup_label=None, reason_label=None,
+                    quality=None, note="q key unwind", key_used="Q",
+                ))
+                self.save()
+                return self.view()
+
         # Cancel all pending orders on session close bar regardless of action.
         if self._is_session_close_bar(row):
             self._flag_order = None
@@ -579,7 +599,7 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  document.getElementById('autoFlat').textContent=state.autoFlatNote||'-';
  document.getElementById('actions').textContent=(state.recentActions||[]).map(a=>`${a.bar_index} ${a.timestamp} ${a.action} ${a.position_before}->${a.position_after}${a.note?` | ${a.note}`:''}`).join('\n');
  }
- window.addEventListener('keydown', (e)=>{ if(e.key==='q'||e.key==='Q'){removeFlagPopup(); pendingFlagBar=null; if(state&&state.flagOrder) cancelFlag(); return;} if(e.key==='Escape'||e.key==='Shift'){removeFlagPopup(); pendingFlagBar=null; return;} if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault(); if(e.ctrlKey&&e.key==='ArrowUp'){act('breakout_long')} else if(e.ctrlKey&&e.key==='ArrowDown'){act('breakout_short')} else if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')} else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')} else if(e.key==='ArrowLeft'){act('flat')} else if(e.key==='ArrowRight'){act('skip')}} });
+ window.addEventListener('keydown', (e)=>{ if(e.key==='q'||e.key==='Q'){removeFlagPopup(); pendingFlagBar=null; act('q'); return;} if(e.key==='Escape'||e.key==='Shift'){removeFlagPopup(); pendingFlagBar=null; return;} if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault(); if(e.ctrlKey&&e.key==='ArrowUp'){act('breakout_long')} else if(e.ctrlKey&&e.key==='ArrowDown'){act('breakout_short')} else if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')} else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')} else if(e.key==='ArrowLeft'){act('flat')} else if(e.key==='ArrowRight'){act('skip')}} });
  load();
 </script></body></html>'''
 
