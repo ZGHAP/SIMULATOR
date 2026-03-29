@@ -337,8 +337,9 @@ class ReplayStore:
             key_used=action.upper(),
         )
         self.state.actions.append(sim_action)
-        # Do not accumulate full snapshots in memory/state during long runs.
-        self.state.current_index = min(i + 1, len(self.df))
+        # Only advance the bar on skip (right arrow); all other actions stay on current bar.
+        if action == "skip":
+            self.state.current_index = min(i + 1, len(self.df))
         try:
             self.save()
         except OSError as e:
@@ -520,7 +521,9 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  ctx.strokeStyle='#2a3342'; ctx.fillStyle='#8aa0b4'; ctx.font='12px system-ui';
  for(let i=0;i<6;i++){ const p=top-(top-bot)*i/5; const y=px(p,bot,top,h,pad.t,pad.b); ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(w-pad.r,y); ctx.stroke(); ctx.fillText(p.toFixed(1),8,y+4); }
  bars.forEach((b,i)=>{ const x=pad.l+i*step+step/2; const yo=px(b.open,bot,top,h,pad.t,pad.b), yc=px(b.close,bot,top,h,pad.t,pad.b), yh=px(b.high,bot,top,h,pad.t,pad.b), yl=px(b.low,bot,top,h,pad.t,pad.b); const bull=b.close>=b.open; ctx.strokeStyle=bull?'#37d67a':'#ff5c5c'; ctx.fillStyle=bull?'#37d67a':'#ff5c5c'; ctx.beginPath(); ctx.moveTo(x,yh); ctx.lineTo(x,yl); ctx.stroke(); const topy=Math.min(yo,yc), bh=Math.max(2,Math.abs(yc-yo)); ctx.fillRect(x-bodyW/2,topy,bodyW,bh); const hhmm=(b.date||'').slice(11,16); if(hhmm==='14:45' || hhmm==='02:15'){ ctx.strokeStyle='#ffd54f'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; } if(i===bars.length-1){ ctx.strokeStyle='#4db3ff'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; }
-   const isLast=i===bars.length-1; if(showRangeLabel||isLast){ ctx.save(); ctx.textAlign='center'; ctx.fillStyle=isLast?'#4db3ff':'#a9b7c6'; ctx.font=(isLast?'11':'10')+'px system-ui'; ctx.fillText(b.high.toFixed(0),x,Math.max(12,yh-5)); ctx.fillStyle=isLast?'#4db3ff':'#7a8a9a'; ctx.fillText(b.low.toFixed(0),x,Math.min(h-pad.b+13,yl+13)); ctx.restore(); }
+   const isLast=i===bars.length-1; const inLast5=i>=bars.length-5; ctx.save(); ctx.textAlign='center';
+   if(inLast5){ ctx.fillStyle=isLast?'#4db3ff':'#a9b7c6'; ctx.font=(isLast?'11':'10')+'px system-ui'; ctx.fillText(b.high.toFixed(0),x,Math.max(12,yh-5)); ctx.fillStyle=isLast?'#4db3ff':'#7a8a9a'; ctx.fillText(b.low.toFixed(0),x,Math.min(h-pad.b+13,yl+13)); }
+   const rng=(b.high-b.low).toFixed(0); ctx.fillStyle=isLast?'#ffd700':'#556070'; ctx.font=(isLast?'bold 11':'9')+'px system-ui'; ctx.fillText(rng,x,Math.min(h-pad.b-2,yl+(inLast5?26:14))); ctx.restore();
  });
  if(bars.length>0&&state.position.side===0){ const lb=bars[bars.length-1]; const boL=lb.high+2*state.tickSize; const boS=lb.low-2*state.tickSize; const x0=pad.l,x1=cv.width-pad.r; const yBL=px(boL,bot,top,h,pad.t,pad.b); const yBS=px(boS,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([5,3]); ctx.lineWidth=1; ctx.strokeStyle='rgba(55,214,122,0.55)'; ctx.beginPath(); ctx.moveTo(x0,yBL); ctx.lineTo(x1,yBL); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#37d67a'; ctx.font='10px system-ui'; ctx.textAlign='right'; ctx.fillText('Ctrl↑ BO@'+boL.toFixed(0),x1-4,yBL-3); ctx.setLineDash([5,3]); ctx.strokeStyle='rgba(255,92,92,0.55)'; ctx.beginPath(); ctx.moveTo(x0,yBS); ctx.lineTo(x1,yBS); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#ff5c5c'; ctx.fillText('Ctrl↓ BO@'+boS.toFixed(0),x1-4,yBS+12); ctx.restore(); }
  if(state.flagOrder){ const fo=state.flagOrder; const tp=fo.trigger_price; const col=fo.side==='long'?'#37d67a':'#ff5c5c'; const x0=pad.l,x1=cv.width-pad.r; const yF=px(tp,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([8,4]); ctx.lineWidth=2; ctx.strokeStyle=col; ctx.beginPath(); ctx.moveTo(x0,yF); ctx.lineTo(x1,yF); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle=col; ctx.font='bold 11px system-ui'; ctx.textAlign='right'; ctx.fillText('FLAG '+(fo.side==='long'?'▲':'▼')+' @'+tp.toFixed(0)+' (Esc cancel)',x1-4,yF+(fo.side==='long'?-4:13)); const bd=(fo.bar_date||'').slice(0,16); for(let bi=0;bi<bars.length;bi++){ if((bars[bi].date||'').slice(0,16)===bd){ const bx=pad.l+bi*step+step/2; const flagY=fo.side==='long'?px(bars[bi].high,bot,top,h,pad.t,pad.b)-14:px(bars[bi].low,bot,top,h,pad.t,pad.b)+14; ctx.fillStyle=col; ctx.font='bold 14px system-ui'; ctx.textAlign='center'; ctx.fillText(fo.side==='long'?'▲':'▼',bx,flagY); break; } } ctx.restore(); }
