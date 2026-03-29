@@ -393,16 +393,16 @@ class ReplayStore:
 
     def _apply_forced_session_flat(self, i: int, row: Any) -> str | None:
         p = self.state.position
-        if i <= 0 or p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
+        if p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
             return None
-        prev_hhmm = str(self.df.iloc[i - 1].get("date", ""))[11:16]
-        if prev_hhmm not in {"14:45", "02:15"}:
+        hhmm = str(row.get("date", ""))[11:16]
+        if hhmm not in {"14:45", "02:15"}:
             return None
         exit_price = float(row["close"])
-        note = f"forced flat on bar after highlighted close bar {prev_hhmm} @ current close {exit_price:g}"
-        self._close_trade(i, row, exit_price=exit_price, exit_reason_label="forced_session_flat_next_bar_close", exit_note=note)
+        note = f"forced flat at session close bar {hhmm} @ close {exit_price:g}"
+        self._close_trade(i, row, exit_price=exit_price, exit_reason_label="forced_session_flat_close", exit_note=note)
         self._flag_order = None  # cancel any pending flag across session boundary
-        return f"auto flat: after {prev_hhmm} bar @ close {exit_price:g}"
+        return f"auto flat: session close {hhmm} @ close {exit_price:g}"
 
     def _close_trade(self, i: int, row: Any, exit_price: float | None = None, exit_reason_label: str | None = None, exit_note: str | None = None) -> None:
         p = self.state.position
