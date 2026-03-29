@@ -389,9 +389,6 @@ class ReplayStore:
             key_used=action.upper(),
         )
         self.state.actions.append(sim_action)
-        # If entry was made on a session close bar, immediately force-unwind at close.
-        if action in {"long", "short"} and self._is_session_close_bar(row):
-            self._apply_forced_session_flat(i, row)
         # Only advance the bar on skip (right arrow); all other actions stay on current bar.
         if action == "skip":
             self.state.current_index = min(i + 1, len(self.df))
@@ -450,20 +447,22 @@ class ReplayStore:
         return None
 
     def _apply_forced_session_flat(self, i: int, row: Any) -> str | None:
-        hhmm = str(row.get("date", ""))[11:16]
-        if hhmm not in {"14:45", "02:15"}:
+        if i <= 0:
             return None
-        # Cancel all pending orders at session close regardless of position.
+        prev_hhmm = str(self.df.iloc[i - 1].get("date", ""))[11:16]
+        if prev_hhmm not in {"14:45", "02:15"}:
+            return None
+        # Cancel all pending orders at session boundary.
         self._flag_order = None
         self._flag_ready = None
         p = self.state.position
         if p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
             return None
         exit_price = float(row["close"])
-        note = f"forced flat at session close bar {hhmm} @ close {exit_price:g}"
+        note = f"forced flat on bar after {prev_hhmm} @ close {exit_price:g}"
         self._close_trade(i, row, exit_price=exit_price, exit_reason_label="forced_session_flat_close", exit_note=note)
-        self._needs_full_save = True  # trigger full flush at end of this apply/view cycle
-        return f"auto flat: session close {hhmm} @ close {exit_price:g}"
+        self._needs_full_save = True
+        return f"auto flat: after {prev_hhmm} bar @ close {exit_price:g}"
 
     def _close_trade(self, i: int, row: Any, exit_price: float | None = None, exit_reason_label: str | None = None, exit_note: str | None = None) -> None:
         p = self.state.position
