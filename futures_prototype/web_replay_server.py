@@ -177,6 +177,9 @@ class ReplayStore:
             auto_flat_note = self._apply_forced_session_flat(i, row)
         if not auto_stop_note and not auto_flat_note:
             auto_flag_note = self._apply_flag_breakout(i, row)
+            # If flag just filled, immediately check stop on the same bar.
+            if auto_flag_note and not auto_stop_note:
+                auto_stop_note = self._apply_hard_stop(i, row)
         self._last_save_error: dict[str, str] | None = None
         if auto_stop_note or auto_flat_note or auto_flag_note:
             try:
@@ -300,7 +303,10 @@ class ReplayStore:
 
         stop_note = self._apply_hard_stop(i, row)
         if not stop_note:
-            self._apply_flag_breakout(i, row)
+            flag_note = self._apply_flag_breakout(i, row)
+            # If flag just filled, immediately check stop on the same bar.
+            if flag_note:
+                stop_note = self._apply_hard_stop(i, row)
         before = self.state.position.side
         after = before
 
@@ -416,22 +422,38 @@ class ReplayStore:
         if p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
             return None
         bar_open = float(row["open"])
-        stop_distance = 20.0
+        stop_distance = 20.0 * self.state.tick_size
+        timestamp = str(row["date"])
+        before_side = p.side
         if p.side > 0:
             stop_price = float(p.entry_price) - stop_distance
             if float(row["low"]) <= stop_price:
-                # conservative mode: if open already gaps through stop, use open; otherwise use stop price
                 exit_price = bar_open if bar_open < stop_price else stop_price
-                note = f"long fixed stop hit @ {'open gap' if bar_open < stop_price else 'entry-20'} {exit_price:g}"
+                note = f"long stop @ {'gap' if bar_open < stop_price else 'entry-20t'} {exit_price:g}"
                 self._close_trade(i, row, exit_price=exit_price, exit_reason_label="hard_stop_entry_minus_20", exit_note=note)
+                self.state.actions.append(SimAction(
+                    session_id=self.state.session_id, instrument=self.instrument,
+                    timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
+                    action="stop", position_before=before_side, position_after=0,
+                    price_reference=exit_price, setup_label=None, reason_label="hard_stop_entry_minus_20",
+                    quality=None, note=note, key_used=None,
+                ))
+                self._needs_full_save = True
                 return f"auto stop: long exit @ {exit_price:g}"
         elif p.side < 0:
             stop_price = float(p.entry_price) + stop_distance
             if float(row["high"]) >= stop_price:
-                # conservative mode: if open already gaps through stop, use open; otherwise use stop price
                 exit_price = bar_open if bar_open > stop_price else stop_price
-                note = f"short fixed stop hit @ {'open gap' if bar_open > stop_price else 'entry+20'} {exit_price:g}"
+                note = f"short stop @ {'gap' if bar_open > stop_price else 'entry+20t'} {exit_price:g}"
                 self._close_trade(i, row, exit_price=exit_price, exit_reason_label="hard_stop_entry_plus_20", exit_note=note)
+                self.state.actions.append(SimAction(
+                    session_id=self.state.session_id, instrument=self.instrument,
+                    timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
+                    action="stop", position_before=before_side, position_after=0,
+                    price_reference=exit_price, setup_label=None, reason_label="hard_stop_entry_plus_20",
+                    quality=None, note=note, key_used=None,
+                ))
+                self._needs_full_save = True
                 return f"auto stop: short exit @ {exit_price:g}"
         return None
 
