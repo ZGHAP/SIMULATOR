@@ -305,17 +305,19 @@ class ReplayStore:
                 self._flag_ready = None
                 self.save()
                 return self.view()
+            # Unwind position regardless — read position again in case flag auto-filled above.
             if self.state.position.side != 0:
-                # No pending order but have position — unwind at close.
-                self._close_trade(i, row)
+                exit_price = float(row["close"])
+                self._close_trade(i, row, exit_price=exit_price, exit_reason_label="manual_flat_q")
                 self.state.actions.append(SimAction(
                     session_id=self.state.session_id, instrument=self.instrument,
                     timeframe=self.timeframe, bar_index=i, timestamp=timestamp,
                     action="flat", position_before=before, position_after=0,
-                    price_reference=price, setup_label=None, reason_label=None,
+                    price_reference=exit_price, setup_label=None, reason_label=None,
                     quality=None, note="q key unwind", key_used="Q",
                 ))
-                self.save()
+                self._needs_full_save = True
+                self.save(force=True)
                 return self.view()
 
         # Cancel all pending orders on session close bar regardless of action.
