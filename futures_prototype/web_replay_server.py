@@ -57,6 +57,7 @@ class ReplayStore:
         self.state_path = self.out_dir / f"{self.instrument}_{self.timeframe or 'unknown'}_state.json"
         self._pending_entry_reason: str | None = None
         self._flag_order: dict | None = None
+        self._flag_ready: dict | None = None  # flag touched trigger; waiting for user confirm
         self.state = ReplayState(
             session_id=uuid.uuid4().hex[:12],
             instrument=self.instrument,
@@ -154,7 +155,7 @@ class ReplayStore:
         if not auto_stop_note and not auto_flat_note:
             auto_flag_note = self._apply_flag_breakout(i, row)
         self._last_save_error: dict[str, str] | None = None
-        if auto_stop_note or auto_flat_note or auto_flag_note:
+        if auto_stop_note or auto_flat_note:
             try:
                 self.save()
             except OSError as e:
@@ -191,6 +192,7 @@ class ReplayStore:
             "autoFlatNote": auto_flat_note,
             "autoFlagNote": auto_flag_note,
             "flagOrder": self._flag_order,
+            "flagReady": self._flag_ready,
         }
 
     @staticmethod
@@ -227,29 +229,43 @@ class ReplayStore:
         return self.view()
 
     def _apply_flag_breakout(self, i: int, row: Any) -> str | None:
+        """Detect when flag trigger is touched; mark ready but do NOT auto-enter.
+        User must confirm with ↑/↓ to fill, or Q to cancel."""
         fo = self._flag_order
         if fo is None or self.state.position.side != 0:
             return None
         if i <= fo["bar_idx"]:
-            return None  # don't trigger on same bar it was set
+            return None
         trigger = fo["trigger_price"]
         side = fo["side"]
         bar_open = float(row["open"])
+        fill = None
         if side == "long" and float(row["high"]) >= trigger:
             fill = bar_open if bar_open > trigger else trigger
-            timestamp = str(row["date"])
-            self.state.position = SimPosition(side=1, entry_price=fill, entry_time=timestamp, entry_bar_index=i)
-            self._pending_entry_reason = "flag_breakout_long"
-            self._flag_order = None
-            return f"flag breakout long triggered @ {fill:g}"
         elif side == "short" and float(row["low"]) <= trigger:
             fill = bar_open if bar_open < trigger else trigger
-            timestamp = str(row["date"])
+        if fill is not None and self._flag_ready is None:
+            self._flag_ready = {"side": side, "fill_price": fill, "bar_idx": i}
+            return f"flag {side} touched @ {fill:g} — press {'↑' if side == 'long' else '↓'} to fill or Q to cancel"
+        return None
+
+    def _confirm_flag_fill(self, i: int, row: Any) -> bool:
+        """Fill the flag order at the pre-computed fill price. Returns True if filled."""
+        fr = self._flag_ready
+        if fr is None or self.state.position.side != 0:
+            return False
+        fill = fr["fill_price"]
+        side = fr["side"]
+        timestamp = str(row["date"])
+        if side == "long":
+            self.state.position = SimPosition(side=1, entry_price=fill, entry_time=timestamp, entry_bar_index=i)
+            self._pending_entry_reason = "flag_breakout_long"
+        else:
             self.state.position = SimPosition(side=-1, entry_price=fill, entry_time=timestamp, entry_bar_index=i)
             self._pending_entry_reason = "flag_breakout_short"
-            self._flag_order = None
-            return f"flag breakout short triggered @ {fill:g}"
-        return None
+        self._flag_order = None
+        self._flag_ready = None
+        return True
 
     def apply(self, action: str) -> dict[str, Any]:
         i = self.state.current_index
@@ -267,7 +283,7 @@ class ReplayStore:
 
         if action == "cancel_flag":
             self._flag_order = None
-            self.state.current_index = min(i + 1, len(self.df))
+            self._flag_ready = None
             self.save()
             return self.view()
 
@@ -286,6 +302,7 @@ class ReplayStore:
                 "bar_high": float(row["high"]),
                 "bar_low": float(row["low"]),
             }
+            self._flag_ready = None
             after = before
         elif action == "breakout_short":
             # Set pending order: fill only when a future bar's low <= current bar's low - 2t
@@ -298,17 +315,28 @@ class ReplayStore:
                 "bar_high": float(row["high"]),
                 "bar_low": float(row["low"]),
             }
+            self._flag_ready = None
             after = before
         elif action == "long":
-            if before == -1:
+            # If a flag is ready (triggered but awaiting confirm), fill at trigger price
+            if self._flag_ready and self._flag_ready["side"] == "long":
+                self._confirm_flag_fill(i, row)
+            elif before == -1:
                 self._close_trade(i, row)
-            if self.state.position.side == 0:
+                if self.state.position.side == 0:
+                    self.state.position = SimPosition(side=1, entry_price=price, entry_time=timestamp, entry_bar_index=i)
+            elif before == 0:
                 self.state.position = SimPosition(side=1, entry_price=price, entry_time=timestamp, entry_bar_index=i)
             after = self.state.position.side
         elif action == "short":
-            if before == 1:
+            # If a flag is ready (triggered but awaiting confirm), fill at trigger price
+            if self._flag_ready and self._flag_ready["side"] == "short":
+                self._confirm_flag_fill(i, row)
+            elif before == 1:
                 self._close_trade(i, row)
-            if self.state.position.side == 0:
+                if self.state.position.side == 0:
+                    self.state.position = SimPosition(side=-1, entry_price=price, entry_time=timestamp, entry_bar_index=i)
+            elif before == 0:
                 self.state.position = SimPosition(side=-1, entry_price=price, entry_time=timestamp, entry_bar_index=i)
             after = self.state.position.side
         elif action == "flat":
@@ -480,6 +508,7 @@ pre{white-space:pre-wrap;word-break:break-word}
 <div><span class="k">Auto flat:</span> <span id="autoFlat" class="v"></span></div>
 <div><span class="k">Flag order:</span> <span id="flagOrder" class="v">-</span></div>
 <div><span class="k">Flag trigger:</span> <span id="autoFlag" class="v">-</span></div>
+<div id="flagReadyBanner" style="display:none;margin-top:8px;padding:8px 10px;border-radius:6px;font-size:13px;font-weight:bold;text-align:center"></div>
 <h4>Recent actions</h4><pre id="actions"></pre>
 </div>
 <script>
@@ -529,6 +558,7 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  if(state.flagOrder){ const fo=state.flagOrder; const tp=fo.trigger_price; const col=fo.side==='long'?'#37d67a':'#ff5c5c'; const x0=pad.l,x1=cv.width-pad.r; const yF=px(tp,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([8,4]); ctx.lineWidth=2; ctx.strokeStyle=col; ctx.beginPath(); ctx.moveTo(x0,yF); ctx.lineTo(x1,yF); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle=col; ctx.font='bold 11px system-ui'; ctx.textAlign='right'; ctx.fillText('FLAG '+(fo.side==='long'?'▲':'▼')+' @'+tp.toFixed(0)+' (Esc cancel)',x1-4,yF+(fo.side==='long'?-4:13)); const bd=(fo.bar_date||'').slice(0,16); for(let bi=0;bi<bars.length;bi++){ if((bars[bi].date||'').slice(0,16)===bd){ const bx=pad.l+bi*step+step/2; const flagY=fo.side==='long'?px(bars[bi].high,bot,top,h,pad.t,pad.b)-14:px(bars[bi].low,bot,top,h,pad.t,pad.b)+14; ctx.fillStyle=col; ctx.font='bold 14px system-ui'; ctx.textAlign='center'; ctx.fillText(fo.side==='long'?'▲':'▼',bx,flagY); break; } } ctx.restore(); }
  const foEl=document.getElementById('flagOrder'); if(state.flagOrder){ const fo=state.flagOrder; foEl.textContent=fo.side.toUpperCase()+' @ '+fo.trigger_price.toFixed(0)+' (flag: '+(fo.bar_date||'').slice(5,16)+')'; foEl.style.color=fo.side==='long'?'#37d67a':'#ff5c5c'; }else{ foEl.textContent='-'; foEl.style.color='#fff'; }
  document.getElementById('autoFlag').textContent=state.autoFlagNote||'-';
+ const banner=document.getElementById('flagReadyBanner'); if(state.flagReady){ const fr=state.flagReady; const isLong=fr.side==='long'; banner.style.display='block'; banner.style.background=isLong?'#1a4030':'#401a1a'; banner.style.color=isLong?'#37d67a':'#ff5c5c'; banner.style.border='1px solid '+(isLong?'#37d67a':'#ff5c5c'); banner.textContent=(isLong?'▲ LONG':'▼ SHORT')+' TRIGGERED @ '+fr.fill_price.toFixed(0)+' — press '+(isLong?'↑':'↓')+' to fill  |  Q to cancel'; }else{ banner.style.display='none'; }
  document.getElementById('title').textContent=`${state.instrument} ${state.timeframe||''}`;
  document.getElementById('pos').textContent=`${state.position.label} x${state.positionSize} (${state.position.side>0?'+1':state.position.side<0?'-1':'0'})`;
  document.getElementById('pnl').textContent=`${state.position.unrealizedTicks.toFixed(1)}t @ tick=${state.tickSize}`;
