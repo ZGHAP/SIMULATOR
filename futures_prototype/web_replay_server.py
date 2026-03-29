@@ -57,7 +57,8 @@ class ReplayStore:
         self.state_path = self.out_dir / f"{self.instrument}_{self.timeframe or 'unknown'}_state.json"
         self._pending_entry_reason: str | None = None
         self._flag_order: dict | None = None
-        self._flag_ready: dict | None = None  # flag touched trigger; waiting for user confirm
+        self._flag_ready: dict | None = None
+        self._needs_full_save: bool = False
         self.state = ReplayState(
             session_id=uuid.uuid4().hex[:12],
             instrument=self.instrument,
@@ -122,19 +123,22 @@ class ReplayStore:
         setattr(self, f"_flushed_{actions_path.stem}", len(actions))
         setattr(self, f"_flushed_{trades_path.stem}", len(trades))
 
-    def save(self) -> dict[str, str]:
+    def save(self, force: bool = False) -> dict[str, str]:
+        """Write to disk only when forced (session close) or explicitly requested.
+        Lightweight checkpoint always written so resume works after crash."""
         actions_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_actions.csv"
         trades_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_trades.csv"
         snapshots_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_snapshots.jsonl"
         summary_path = self.out_dir / f"{self.instrument}_{self.state.session_id}_summary.json"
 
-        # Append only the last action/trade rather than rewriting the full list each time.
-        self._append_csv(actions_path, self.state.actions)
-        self._append_csv(trades_path, self.state.trades)
-        if snapshots_path.exists():
-            snapshots_path.unlink()
+        if force:
+            # Full flush: rewrite CSVs with everything in memory.
+            self._write_csv(actions_path, [asdict(x) for x in self.state.actions])
+            self._write_csv(trades_path, [asdict(x) for x in self.state.trades])
+            if snapshots_path.exists():
+                snapshots_path.unlink()
 
-        # State JSON: store only lightweight checkpoint (no full action/trade lists).
+        # Always write lightweight checkpoint so resume works.
         payload = {
             "session_id": self.state.session_id,
             "instrument": self.instrument,
@@ -148,12 +152,13 @@ class ReplayStore:
             "actions_count": len(self.state.actions),
             "trades_count": len(self.state.trades),
         }
-        self.state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        summary_path.write_text(json.dumps({
-            **payload,
-            "open_position": asdict(self.state.position),
-            "state_path": str(self.state_path),
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.state_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        if force:
+            summary_path.write_text(json.dumps({
+                **payload,
+                "open_position": asdict(self.state.position),
+                "state_path": str(self.state_path),
+            }, indent=2, ensure_ascii=False), encoding="utf-8")
         return {
             "actions": str(actions_path),
             "trades": str(trades_path),
@@ -175,7 +180,9 @@ class ReplayStore:
         self._last_save_error: dict[str, str] | None = None
         if auto_stop_note or auto_flat_note or auto_flag_note:
             try:
-                self.save()
+                force = self._needs_full_save
+                self._needs_full_save = False
+                self.save(force=force)
             except OSError as e:
                 if e.errno == errno.ENOSPC:
                     self._last_save_error = {
@@ -367,7 +374,9 @@ class ReplayStore:
         if action == "skip":
             self.state.current_index = min(i + 1, len(self.df))
         try:
-            self.save()
+            force = self._needs_full_save
+            self._needs_full_save = False
+            self.save(force=force)
         except OSError as e:
             if e.errno == errno.ENOSPC:
                 return {
@@ -431,6 +440,7 @@ class ReplayStore:
         exit_price = float(row["close"])
         note = f"forced flat at session close bar {hhmm} @ close {exit_price:g}"
         self._close_trade(i, row, exit_price=exit_price, exit_reason_label="forced_session_flat_close", exit_note=note)
+        self._needs_full_save = True  # trigger full flush at end of this apply/view cycle
         return f"auto flat: session close {hhmm} @ close {exit_price:g}"
 
     def _close_trade(self, i: int, row: Any, exit_price: float | None = None, exit_reason_label: str | None = None, exit_note: str | None = None) -> None:
@@ -484,23 +494,6 @@ class ReplayStore:
             writer.writeheader()
             writer.writerows(rows)
 
-    def _append_csv(self, path: Path, records: list) -> None:
-        """Append only new records since last save, using in-memory flush counter."""
-        flush_attr = f"_flushed_{path.stem}"
-        flushed = getattr(self, flush_attr, 0)
-        new_records = records[flushed:]
-        if not new_records:
-            return
-        rows = [asdict(r) for r in new_records]
-        write_header = not path.exists() or flushed == 0
-        with path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            if write_header:
-                f.seek(0, 2)  # seek to end
-                if f.tell() == 0:
-                    writer.writeheader()
-            writer.writerows(rows)
-        setattr(self, flush_attr, len(records))
 
 
 INDEX_HTML = r'''<!doctype html>
