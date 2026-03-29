@@ -305,7 +305,7 @@ class ReplayStore:
                 self._flag_ready = None
                 self.save()
                 return self.view()
-            elif self.state.position.side != 0:
+            if self.state.position.side != 0:
                 # No pending order but have position — unwind at close.
                 self._close_trade(i, row)
                 self.state.actions.append(SimAction(
