@@ -367,23 +367,25 @@ class ReplayStore:
         else:
             return self.view()
 
-        sim_action = SimAction(
-            session_id=self.state.session_id,
-            instrument=self.instrument,
-            timeframe=self.timeframe,
-            bar_index=i,
-            timestamp=timestamp,
-            action=action,
-            position_before=before,
-            position_after=after,
-            price_reference=price,
-            setup_label=None,
-            reason_label=None,
-            quality=None,
-            note=stop_note,
-            key_used=action.upper(),
-        )
-        self.state.actions.append(sim_action)
+        # Skip the redundant sim_action if hard stop already logged its own action.
+        if not stop_note:
+            sim_action = SimAction(
+                session_id=self.state.session_id,
+                instrument=self.instrument,
+                timeframe=self.timeframe,
+                bar_index=i,
+                timestamp=timestamp,
+                action=action,
+                position_before=before,
+                position_after=after,
+                price_reference=price,
+                setup_label=None,
+                reason_label=None,
+                quality=None,
+                note=None,
+                key_used=action.upper(),
+            )
+            self.state.actions.append(sim_action)
         # Only advance the bar on skip (right arrow); all other actions stay on current bar.
         if action == "skip":
             self.state.current_index = min(i + 1, len(self.df))
