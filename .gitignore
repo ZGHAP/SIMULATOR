@@ -1,2 +1,5 @@
 futures_prototype/output/
 .claude/
+**/__pycache__/
+*.pyc
+*.pyo
