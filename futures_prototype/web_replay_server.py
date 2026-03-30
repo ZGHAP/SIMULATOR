@@ -60,6 +60,7 @@ class ReplayStore:
         self._flag_order: dict | None = None
         self._flag_ready: dict | None = None
         self._needs_full_save: bool = False
+        self.stop_ticks: float = 20.0
         self.state = ReplayState(
             session_id=uuid.uuid4().hex[:12],
             instrument=self.instrument,
@@ -223,6 +224,7 @@ class ReplayStore:
             "autoFlatNote": auto_flat_note,
             "autoFlagNote": auto_flag_note,
             "flagOrder": self._flag_order,
+            "stopTicks": self.stop_ticks,
         }
 
     @staticmethod
@@ -434,7 +436,7 @@ class ReplayStore:
         if p.side == 0 or p.entry_price is None or p.entry_time is None or p.entry_bar_index is None:
             return None
         bar_open = float(row["open"])
-        stop_distance = 20.0 * self.state.tick_size
+        stop_distance = self.stop_ticks * self.state.tick_size
         timestamp = str(row["date"])
         before_side = p.side
         # On the entry bar of a breakout, if bar opened below the long trigger (or above the
@@ -572,6 +574,7 @@ pre{white-space:pre-wrap;word-break:break-word}
 <div><span class="k">Net PnL:</span> <span id="netPnl" class="v"></span></div>
 <div><span class="k">Current:</span> <span id="bar" class="v"></span></div>
 <div><span class="k">Index:</span> <span id="idx" class="v"></span></div>
+<div><span class="k">Stop loss:</span> <input id="stopTicks" type="number" min="1" step="1" value="20" style="width:60px;background:#1a2230;color:#fff;border:1px solid #445;border-radius:4px;padding:2px 5px;font-size:13px"> <span style="color:#8aa0b4;font-size:12px">ticks</span> <button onclick="setStop()" style="background:#2a3342;color:#fff;border:1px solid #445;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:12px">Set</button></div>
 <div><span class="k">Auto stop:</span> <span id="autoStop" class="v"></span></div>
 <div><span class="k">Auto flat:</span> <span id="autoFlat" class="v"></span></div>
 <div><span class="k">Flag order:</span> <span id="flagOrder" class="v">-</span></div>
@@ -586,6 +589,7 @@ async function act(action){ const r = await fetch('/api/action',{method:'POST',h
 function removeFlagPopup(){ if(flagPopup){flagPopup.remove();flagPopup=null;} }
 async function setFlag(barDate,side){ removeFlagPopup(); pendingFlagBar=null; const r=await fetch('/api/flag',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bar_date:barDate,side})}); state=await r.json(); render(); }
 async function cancelFlag(){ removeFlagPopup(); pendingFlagBar=null; const r=await fetch('/api/flag/cancel',{method:'POST'}); state=await r.json(); render(); }
+async function setStop(){ const t=parseFloat(document.getElementById('stopTicks').value); if(t>0){ const r=await fetch('/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticks:t})}); state=await r.json(); render(); } }
 cv.addEventListener('click',(e)=>{
   if(!e.ctrlKey||!state) return; e.preventDefault();
   const bars=state.windowBars; if(!bars||!bars.length) return;
@@ -635,7 +639,7 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  document.getElementById('netPnl').textContent=`${state.netPnlTicks.toFixed(1)}t`;
  const b=state.currentBar; document.getElementById('bar').textContent=`O ${b.open} H ${b.high} L ${b.low} C ${b.close}`;
  document.getElementById('idx').textContent=`${state.index}/${state.total-1} ${b.date}`;
- document.getElementById('autoStop').textContent=state.autoStopNote||'-';
+ document.getElementById('autoStop').textContent=state.autoStopNote||'-'; document.getElementById('stopTicks').value=state.stopTicks||20;
  document.getElementById('autoFlat').textContent=state.autoFlatNote||'-';
  document.getElementById('actions').textContent=(state.recentActions||[]).slice().reverse().map(a=>{
    const side=a.position_after>0?'▲LONG':a.position_after<0?'▼SHORT':'FLAT';
@@ -699,6 +703,15 @@ def make_handler(store: ReplayStore):
                 return
             if parsed.path == "/api/flag/cancel":
                 self._json(store.cancel_flag_order())
+                return
+            if parsed.path == "/api/stop":
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length) if length else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                ticks = float(payload.get("ticks", store.stop_ticks))
+                if ticks > 0:
+                    store.stop_ticks = ticks
+                self._json(store.view())
                 return
             self.send_response(404)
             self.end_headers()
