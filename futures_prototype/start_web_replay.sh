@@ -2,12 +2,12 @@
 set -euo pipefail
 PYTHON="${PYTHON:-/home/fhu/anaconda3/envs/rq/bin/python}"
 
-SYMBOL="AG99"
+SYMBOL="SC99"
 TIMEFRAME="15m"
 INPUT_DIR="$HOME/livedata"
-LOOKBACK=30
+LOOKBACK=51
 OUT_DIR="output/sim"
-TICK_SIZE="1"
+TICK_SIZE="0.1"
 POSITION_SIZE="1"
 HOST="0.0.0.0"
 PORT="8765"

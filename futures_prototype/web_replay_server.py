@@ -111,7 +111,7 @@ class ReplayStore:
             timeframe=payload.get("timeframe") or self.timeframe,
             input_path=payload.get("input_path") or self.input_path,
             lookback=int(payload.get("lookback", self.lookback)),
-            tick_size=float(payload.get("tick_size", self.tick_size)),
+            tick_size=self.tick_size,  # always use CLI arg, not saved state
             position_size=int(payload.get("position_size", self.position_size)),
             current_index=int(payload.get("current_index", 0)),
             position=SimPosition(**payload.get("position", {})),
@@ -302,6 +302,7 @@ class ReplayStore:
             action = "flat"
 
         stop_note = self._apply_hard_stop(i, row)
+        flag_note = None
         if not stop_note:
             flag_note = self._apply_flag_breakout(i, row)
             # If flag just filled, immediately check stop on the same bar.
@@ -315,8 +316,14 @@ class ReplayStore:
             self.save()
             return self.view()
 
-        # Cancel all pending orders on session close bar regardless of action.
+        # On session close bar: if flag just triggered, immediately flat at this bar's close.
         if self._is_session_close_bar(row):
+            if flag_note and self.state.position.side != 0:
+                close_px = float(row["close"])
+                self._close_trade(i, row, exit_price=close_px,
+                                  exit_reason_label="forced_session_flat_close",
+                                  exit_note=f"flag triggered on close bar, auto flat @ {close_px:g}")
+                self._needs_full_save = True
             self._flag_order = None
             self._flag_ready = None
 
@@ -427,9 +434,22 @@ class ReplayStore:
         stop_distance = 20.0 * self.state.tick_size
         timestamp = str(row["date"])
         before_side = p.side
+        # On the entry bar of a breakout, if bar opened below the long trigger (or above the
+        # short trigger), the wick against the trade predates the fill — use close for the
+        # stop check.  If the bar gapped past the trigger (open already beyond fill price),
+        # all subsequent moves are post-fill so use low/high normally.
+        is_entry_bar = (i == p.entry_bar_index)
+        if is_entry_bar and p.side > 0 and bar_open < float(p.entry_price):
+            bar_low = float(row["close"])
+        else:
+            bar_low = float(row["low"])
+        if is_entry_bar and p.side < 0 and bar_open > float(p.entry_price):
+            bar_high = float(row["close"])
+        else:
+            bar_high = float(row["high"])
         if p.side > 0:
             stop_price = float(p.entry_price) - stop_distance
-            if float(row["low"]) <= stop_price:
+            if bar_low <= stop_price:
                 exit_price = bar_open if bar_open < stop_price else stop_price
                 note = f"long stop @ {'gap' if bar_open < stop_price else 'entry-20t'} {exit_price:g}"
                 self._close_trade(i, row, exit_price=exit_price, exit_reason_label="hard_stop_entry_minus_20", exit_note=note)
@@ -444,7 +464,7 @@ class ReplayStore:
                 return f"auto stop: long exit @ {exit_price:g}"
         elif p.side < 0:
             stop_price = float(p.entry_price) + stop_distance
-            if float(row["high"]) >= stop_price:
+            if bar_high >= stop_price:
                 exit_price = bar_open if bar_open > stop_price else stop_price
                 note = f"short stop @ {'gap' if bar_open > stop_price else 'entry+20t'} {exit_price:g}"
                 self._close_trade(i, row, exit_price=exit_price, exit_reason_label="hard_stop_entry_plus_20", exit_note=note)
@@ -541,7 +561,7 @@ pre{white-space:pre-wrap;word-break:break-word}
 <body>
 <div id="left"><canvas id="cv" width="1200" height="760"></canvas></div>
 <div id="right">
-<div><span class="btn">Ctrl+click select bar</span><span class="btn" style="color:#37d67a">↑ flag long break</span><span class="btn" style="color:#ff5c5c">↓ flag short break</span><span class="btn">← cancel flag or flat</span><span class="btn">→ skip</span><span class="btn" style="color:#4fc3f7">Ctrl+↑/↓ BO current bar</span><span class="btn">Esc cancel flag only</span></div>
+<div><span class="btn">Ctrl+click select bar</span><span class="btn" style="color:#37d67a">↑ flag long break</span><span class="btn" style="color:#ff5c5c">↓ flag short break</span><span class="btn">← cancel flag or flat</span><span class="btn">→ skip</span><span class="btn" style="color:#4fc3f7">Ctrl+←/→ select bar &nbsp;|&nbsp; Ctrl+↑/↓ BO selected bar</span><span class="btn">Esc cancel flag only</span></div>
 <h3 id="title"></h3>
 <div><span class="k">Position:</span> <span id="pos" class="v"></span></div>
 <div><span class="k">Open PnL:</span> <span id="pnl" class="v"></span></div>
@@ -557,7 +577,7 @@ pre{white-space:pre-wrap;word-break:break-word}
 </div>
 <script>
 const cv = document.getElementById('cv'); const ctx = cv.getContext('2d');
-let state = null; let flagPopup = null; let pendingFlagBar = null;
+let state = null; let flagPopup = null; let pendingFlagBar = null; let ctrlBarIdx = null; let ctrlMode = false;
 async function load(){ const r = await fetch('/api/state'); state = await r.json(); render(); }
 async function act(action){ const r = await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})}); state = await r.json(); render(); }
 function removeFlagPopup(){ if(flagPopup){flagPopup.remove();flagPopup=null;} }
@@ -572,7 +592,7 @@ cv.addEventListener('click',(e)=>{
   const idx=Math.floor((mx-60)/step);
   if(idx<0||idx>=bars.length) return;
   const b=bars[idx]; const tk=state.tickSize;
-  const boL=(b.high+2*tk).toFixed(0); const boS=(b.low-2*tk).toFixed(0);
+  const pDec=state.tickSize<1?1:0; const boL=(b.high+2*tk).toFixed(pDec); const boS=(b.low-2*tk).toFixed(pDec);
   pendingFlagBar=b;
   removeFlagPopup();
   const d=document.createElement('div'); d.id='flagpopup';
@@ -587,20 +607,23 @@ cv.addEventListener('click',(e)=>{
 });
 document.addEventListener('click',(e)=>{ if(flagPopup&&!flagPopup.contains(e.target)&&!e.ctrlKey) removeFlagPopup(); });
 function px(v,min,max,h,padTop,padBottom){ return padTop + (max-v)/(max-min||1)*(h-padTop-padBottom); }
-function render(){ if(!state) return; const bars=state.windowBars; const w=cv.width,h=cv.height; ctx.clearRect(0,0,w,h); ctx.fillStyle='#111722'; ctx.fillRect(0,0,w,h);
- const pad={l:60,r:20,t:20,b:40}; const hi=Math.max(...bars.map(b=>b.high)); const lo=Math.min(...bars.map(b=>b.low)); const span=Math.max(hi-lo,1e-9); const top=hi+span*0.05; const bot=lo-span*0.05;
+function render(){ if(!state) return; const bars=state.windowBars; const w=cv.width,h=cv.height; ctx.clearRect(0,0,w,h); ctx.fillStyle='#111722'; ctx.fillRect(0,0,w,h); const pDec=state.tickSize<1?1:0; const pfmt=v=>v.toFixed(pDec);
+ const volH=60; const pad={l:60,r:20,t:20,b:40+volH}; const hi=Math.max(...bars.map(b=>b.high)); const lo=Math.min(...bars.map(b=>b.low)); const span=Math.max(hi-lo,1e-9); const top=hi+span*0.05; const bot=lo-span*0.05;
  const usableW=w-pad.l-pad.r; const step=usableW/bars.length; const bodyW=Math.max(6, step*0.65);
  const showRangeLabel = step >= 22;
  ctx.strokeStyle='#2a3342'; ctx.fillStyle='#8aa0b4'; ctx.font='12px system-ui';
  for(let i=0;i<6;i++){ const p=top-(top-bot)*i/5; const y=px(p,bot,top,h,pad.t,pad.b); ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(w-pad.r,y); ctx.stroke(); ctx.fillText(p.toFixed(1),8,y+4); }
  bars.forEach((b,i)=>{ const x=pad.l+i*step+step/2; const yo=px(b.open,bot,top,h,pad.t,pad.b), yc=px(b.close,bot,top,h,pad.t,pad.b), yh=px(b.high,bot,top,h,pad.t,pad.b), yl=px(b.low,bot,top,h,pad.t,pad.b); const bull=b.close>=b.open; ctx.strokeStyle=bull?'#37d67a':'#ff5c5c'; ctx.fillStyle=bull?'#37d67a':'#ff5c5c'; ctx.beginPath(); ctx.moveTo(x,yh); ctx.lineTo(x,yl); ctx.stroke(); const topy=Math.min(yo,yc), bh=Math.max(2,Math.abs(yc-yo)); ctx.fillRect(x-bodyW/2,topy,bodyW,bh); const hhmm=(b.date||'').slice(11,16); if(hhmm==='14:45' || hhmm==='02:15'){ ctx.strokeStyle='#ffd54f'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; } if(i===bars.length-1){ ctx.strokeStyle='#4db3ff'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; }
    const isLast=i===bars.length-1; const inLast5=i>=bars.length-5; ctx.save(); ctx.textAlign='center';
-   if(inLast5){ ctx.fillStyle=isLast?'#4db3ff':'#a9b7c6'; ctx.font=(isLast?'11':'10')+'px system-ui'; ctx.fillText(b.high.toFixed(0),x,Math.max(12,yh-5)); ctx.fillStyle=isLast?'#4db3ff':'#7a8a9a'; ctx.fillText(b.low.toFixed(0),x,Math.min(h-pad.b+13,yl+13)); }
-   const rng=(b.high-b.low).toFixed(0); ctx.fillStyle=isLast?'#ffd700':'#556070'; ctx.font=(isLast?'bold 11':'9')+'px system-ui'; ctx.fillText(rng,x,Math.min(h-pad.b-2,yl+(inLast5?26:14))); ctx.restore();
+   if(inLast5){ ctx.fillStyle=isLast?'#4db3ff':'#a9b7c6'; ctx.font=(isLast?'11':'10')+'px system-ui'; ctx.fillText(pfmt(b.high),x,Math.max(12,yh-5)); ctx.fillStyle=isLast?'#4db3ff':'#7a8a9a'; ctx.fillText(pfmt(b.low),x,Math.min(h-pad.b+13,yl+13)); }
+   const rng=((b.high-b.low)/state.tickSize).toFixed(0); ctx.fillStyle=isLast?'#ffd700':'#556070'; ctx.font=(isLast?'bold 11':'9')+'px system-ui'; ctx.fillText(rng,x,Math.min(h-pad.b-2,yl+(inLast5?26:14))); ctx.restore();
  });
- if(bars.length>0&&state.position.side===0){ const lb=bars[bars.length-1]; const boL=lb.high+2*state.tickSize; const boS=lb.low-2*state.tickSize; const x0=pad.l,x1=cv.width-pad.r; const yBL=px(boL,bot,top,h,pad.t,pad.b); const yBS=px(boS,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([5,3]); ctx.lineWidth=1; ctx.strokeStyle='rgba(55,214,122,0.55)'; ctx.beginPath(); ctx.moveTo(x0,yBL); ctx.lineTo(x1,yBL); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#37d67a'; ctx.font='10px system-ui'; ctx.textAlign='right'; ctx.fillText('Ctrl↑ BO@'+boL.toFixed(0),x1-4,yBL-3); ctx.setLineDash([5,3]); ctx.strokeStyle='rgba(255,92,92,0.55)'; ctx.beginPath(); ctx.moveTo(x0,yBS); ctx.lineTo(x1,yBS); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#ff5c5c'; ctx.fillText('Ctrl↓ BO@'+boS.toFixed(0),x1-4,yBS+12); ctx.restore(); }
- if(state.flagOrder){ const fo=state.flagOrder; const tp=fo.trigger_price; const col=fo.side==='long'?'#37d67a':'#ff5c5c'; const x0=pad.l,x1=cv.width-pad.r; const yF=px(tp,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([8,4]); ctx.lineWidth=2; ctx.strokeStyle=col; ctx.beginPath(); ctx.moveTo(x0,yF); ctx.lineTo(x1,yF); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle=col; ctx.font='bold 11px system-ui'; ctx.textAlign='right'; ctx.fillText('FLAG '+(fo.side==='long'?'▲':'▼')+' @'+tp.toFixed(0)+' (Esc cancel)',x1-4,yF+(fo.side==='long'?-4:13)); const bd=(fo.bar_date||'').slice(0,16); for(let bi=0;bi<bars.length;bi++){ if((bars[bi].date||'').slice(0,16)===bd){ const bx=pad.l+bi*step+step/2; const flagY=fo.side==='long'?px(bars[bi].high,bot,top,h,pad.t,pad.b)-14:px(bars[bi].low,bot,top,h,pad.t,pad.b)+14; ctx.fillStyle=col; ctx.font='bold 14px system-ui'; ctx.textAlign='center'; ctx.fillText(fo.side==='long'?'▲':'▼',bx,flagY); break; } } ctx.restore(); }
- const foEl=document.getElementById('flagOrder'); if(state.flagOrder){ const fo=state.flagOrder; foEl.textContent=fo.side.toUpperCase()+' @ '+fo.trigger_price.toFixed(0)+' (flag: '+(fo.bar_date||'').slice(5,16)+')'; foEl.style.color=fo.side==='long'?'#37d67a':'#ff5c5c'; }else{ foEl.textContent='-'; foEl.style.color='#fff'; }
+ if(ctrlBarIdx!==null&&ctrlBarIdx>=0&&ctrlBarIdx<bars.length){ const b=bars[ctrlBarIdx]; const x=pad.l+ctrlBarIdx*step+step/2; const yh=px(b.high,bot,top,h,pad.t,pad.b); const tk=state.tickSize; ctx.save(); ctx.fillStyle='#ffffff'; ctx.strokeStyle='#ffffff'; ctx.lineWidth=2; ctx.textAlign='center'; ctx.font='bold 13px system-ui'; const ay=yh-22; ctx.beginPath(); ctx.moveTo(x,ay+14); ctx.lineTo(x-6,ay+4); ctx.lineTo(x-2,ay+4); ctx.lineTo(x-2,ay); ctx.lineTo(x+2,ay); ctx.lineTo(x+2,ay+4); ctx.lineTo(x+6,ay+4); ctx.closePath(); ctx.fill(); const pDec=tk<1?1:0; ctx.fillStyle='#fff'; ctx.font='9px system-ui'; ctx.fillText('H:'+b.high.toFixed(pDec)+' L:'+b.low.toFixed(pDec),x,ay-3); ctx.restore(); }
+ { const maxVol=Math.max(...bars.map(b=>b.volume||0),1); const volTop=h-pad.b+8; const volBot=h-8; bars.forEach((b,i)=>{ const x=pad.l+i*step+step/2; const bull=b.close>=b.open; const vh=(b.volume||0)/maxVol*(volBot-volTop); ctx.fillStyle=bull?'rgba(55,214,122,0.5)':'rgba(255,92,92,0.5)'; ctx.fillRect(x-bodyW/2,volBot-vh,bodyW,vh); }); ctx.fillStyle='#556070'; ctx.font='9px system-ui'; ctx.textAlign='left'; ctx.fillText('Vol',pad.l+2,volTop+9); }
+ if(bars.length>0&&state.position.side===0){ const lb=bars[bars.length-1]; const boL=lb.high+2*state.tickSize; const boS=lb.low-2*state.tickSize; const x0=pad.l,x1=cv.width-pad.r; const yBL=px(boL,bot,top,h,pad.t,pad.b); const yBS=px(boS,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([5,3]); ctx.lineWidth=1; ctx.strokeStyle='rgba(55,214,122,0.55)'; ctx.beginPath(); ctx.moveTo(x0,yBL); ctx.lineTo(x1,yBL); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#37d67a'; ctx.font='10px system-ui'; ctx.textAlign='right'; ctx.fillText('Ctrl↑ BO@'+pfmt(boL),x1-4,yBL-3); ctx.setLineDash([5,3]); ctx.strokeStyle='rgba(255,92,92,0.55)'; ctx.beginPath(); ctx.moveTo(x0,yBS); ctx.lineTo(x1,yBS); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle='#ff5c5c'; ctx.fillText('Ctrl↓ BO@'+pfmt(boS),x1-4,yBS+12); ctx.restore(); }
+ if(state.position.side!==0&&state.position.entryPrice!=null){ const ep=state.position.entryPrice; const col=state.position.side===1?'#37d67a':'#ff5c5c'; const x0=pad.l,x1=cv.width-pad.r; const yE=px(ep,bot,top,h,pad.t,pad.b); ctx.save(); ctx.lineWidth=1.5; ctx.strokeStyle=col; ctx.beginPath(); ctx.moveTo(x0,yE); ctx.lineTo(x1,yE); ctx.stroke(); ctx.fillStyle=col; ctx.font='bold 10px system-ui'; ctx.textAlign='right'; ctx.fillText((state.position.side===1?'LONG':'SHORT')+' entry @'+pfmt(ep),x1-4,yE-3); ctx.restore(); }
+ if(state.flagOrder){ const fo=state.flagOrder; const tp=fo.trigger_price; const col=fo.side==='long'?'#37d67a':'#ff5c5c'; const x0=pad.l,x1=cv.width-pad.r; const yF=px(tp,bot,top,h,pad.t,pad.b); ctx.save(); ctx.setLineDash([8,4]); ctx.lineWidth=2; ctx.strokeStyle=col; ctx.beginPath(); ctx.moveTo(x0,yF); ctx.lineTo(x1,yF); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle=col; ctx.font='bold 11px system-ui'; ctx.textAlign='right'; ctx.fillText('FLAG '+(fo.side==='long'?'▲':'▼')+' @'+pfmt(tp)+' (Esc cancel)',x1-4,yF+(fo.side==='long'?-4:13)); const bd=(fo.bar_date||'').slice(0,16); for(let bi=0;bi<bars.length;bi++){ if((bars[bi].date||'').slice(0,16)===bd){ const bx=pad.l+bi*step+step/2; const flagY=fo.side==='long'?px(bars[bi].high,bot,top,h,pad.t,pad.b)-14:px(bars[bi].low,bot,top,h,pad.t,pad.b)+14; ctx.fillStyle=col; ctx.font='bold 14px system-ui'; ctx.textAlign='center'; ctx.fillText(fo.side==='long'?'▲':'▼',bx,flagY); break; } } ctx.restore(); }
+ const foEl=document.getElementById('flagOrder'); if(state.flagOrder){ const fo=state.flagOrder; foEl.textContent=fo.side.toUpperCase()+' @ '+pfmt(fo.trigger_price)+' (flag: '+(fo.bar_date||'').slice(5,16)+')'; foEl.style.color=fo.side==='long'?'#37d67a':'#ff5c5c'; }else{ foEl.textContent='-'; foEl.style.color='#fff'; }
  document.getElementById('autoFlag').textContent=state.autoFlagNote||'-';
  document.getElementById('title').textContent=`${state.instrument} ${state.timeframe||''}`;
  document.getElementById('pos').textContent=`${state.position.label} x${state.positionSize} (${state.position.side>0?'+1':state.position.side<0?'-1':'0'})`;
@@ -614,13 +637,29 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  document.getElementById('actions').textContent=(state.recentActions||[]).slice().reverse().map(a=>{
    const side=a.position_after>0?'▲LONG':a.position_after<0?'▼SHORT':'FLAT';
    const dir=a.position_after>0?'L':a.position_after<0?'S':'—';
-   const price=a.price_reference!=null?(' @ '+parseFloat(a.price_reference).toFixed(0)):'';
+   const pDec=state.tickSize<1?1:0; const price=a.price_reference!=null?(' @ '+parseFloat(a.price_reference).toFixed(pDec)):'';
    const note=a.note?(' | '+a.note):'';
    const ts=(a.timestamp||'').slice(5,16);
    return `${ts} ${side}${price}${note}`;
  }).join('\n');
  }
- window.addEventListener('keydown', (e)=>{ if(e.repeat) return; if(e.key==='Escape'){removeFlagPopup(); pendingFlagBar=null; return;} if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault(); if(e.ctrlKey&&e.key==='ArrowUp'){act('breakout_long')} else if(e.ctrlKey&&e.key==='ArrowDown'){act('breakout_short')} else if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')} else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')} else if(e.key==='ArrowLeft'){removeFlagPopup(); pendingFlagBar=null; act('q')} else if(e.key==='ArrowRight'){act('skip')}} });
+ window.addEventListener('keydown', (e)=>{
+  if(e.repeat) return;
+  if(e.key==='Control'){ ctrlMode=true; if(state&&ctrlBarIdx===null){ ctrlBarIdx=(state.windowBars||[]).length-1; } render(); return; }
+  if(e.key==='Escape'){removeFlagPopup(); pendingFlagBar=null; ctrlBarIdx=null; ctrlMode=false; render(); return;}
+  if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){
+    e.preventDefault();
+    if(e.ctrlKey&&e.key==='ArrowLeft'){ if(ctrlBarIdx===null&&state) ctrlBarIdx=(state.windowBars||[]).length-1; ctrlBarIdx=Math.max(0,ctrlBarIdx-1); render(); return; }
+    if(e.ctrlKey&&e.key==='ArrowRight'){ if(ctrlBarIdx===null&&state) ctrlBarIdx=(state.windowBars||[]).length-1; ctrlBarIdx=Math.min((state.windowBars||[]).length-1,ctrlBarIdx+1); render(); return; }
+    if(e.ctrlKey&&e.key==='ArrowUp'){ const b=ctrlBarIdx!==null?(state.windowBars||[])[ctrlBarIdx]:null; if(b){removeFlagPopup();pendingFlagBar=b;setFlag(b.date,'long');}else{act('breakout_long');} ctrlBarIdx=null; ctrlMode=false; return; }
+    if(e.ctrlKey&&e.key==='ArrowDown'){ const b=ctrlBarIdx!==null?(state.windowBars||[])[ctrlBarIdx]:null; if(b){removeFlagPopup();pendingFlagBar=b;setFlag(b.date,'short');}else{act('breakout_short');} ctrlBarIdx=null; ctrlMode=false; return; }
+    if(e.key==='ArrowUp'&&pendingFlagBar){setFlag(pendingFlagBar.date,'long')}
+    else if(e.key==='ArrowDown'&&pendingFlagBar){setFlag(pendingFlagBar.date,'short')}
+    else if(e.key==='ArrowLeft'){removeFlagPopup(); pendingFlagBar=null; act('q')}
+    else if(e.key==='ArrowRight'){act('skip')}
+  }
+ });
+ window.addEventListener('keyup',(e)=>{ if(e.key==='Control'){ ctrlMode=false; if(ctrlBarIdx!==null){ctrlBarIdx=null; render();} } });
  load();
 </script></body></html>'''
 
