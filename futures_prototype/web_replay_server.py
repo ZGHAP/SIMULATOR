@@ -5,6 +5,7 @@ import argparse
 import csv
 import errno
 import json
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -167,6 +168,13 @@ class ReplayStore:
             "state": str(self.state_path),
         }
 
+    def _save_bg(self) -> None:
+        """Run full save in background thread to avoid blocking HTTP response."""
+        try:
+            self.save(force=True)
+        except OSError:
+            pass
+
     def view(self) -> dict[str, Any]:
         i = min(self.state.current_index, len(self.df) - 1)
         row = self.df.iloc[i]
@@ -182,18 +190,13 @@ class ReplayStore:
                 auto_stop_note = self._apply_hard_stop(i, row)
         self._last_save_error: dict[str, str] | None = None
         if auto_stop_note or auto_flat_note or auto_flag_note:
-            try:
-                force = self._needs_full_save
-                self._needs_full_save = False
-                self.save(force=force)
-            except OSError as e:
-                if e.errno == errno.ENOSPC:
-                    self._last_save_error = {
-                        "saveError": "disk_full",
-                        "saveErrorDetail": f"No space left on device while writing replay outputs to {self.out_dir}",
-                    }
-                else:
-                    raise
+            force = self._needs_full_save
+            self._needs_full_save = False
+            if force:
+                # Full CSV rewrite — run in background so it doesn't block the response.
+                threading.Thread(target=self._save_bg, daemon=True).start()
+            else:
+                self.save(force=False)
         start = max(0, i - self.lookback + 1)
         window_df = self.df.iloc[start:i + 1][["date", "open", "high", "low", "close", "volume"]].copy()
         return {
