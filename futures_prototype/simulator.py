@@ -17,6 +17,16 @@ import pandas as pd
 from features_v2 import add_core_features, load_ohlcv
 from terminal_kline import TerminalKlineRenderer, ViewerConfig, clear_screen
 
+# Per-instrument night-session close times (shared with web_replay_server).
+_NIGHT_CLOSE_BY_INSTRUMENT: dict[str, str] = {
+    "J99":  "23:00",
+    "ZC99": "23:00",
+}
+
+def _session_close_times(instrument: str) -> set[str]:
+    night = _NIGHT_CLOSE_BY_INSTRUMENT.get(instrument.upper(), "02:15")
+    return {"14:45", night}
+
 
 ARROW_UP = "UP"
 ARROW_DOWN = "DOWN"
@@ -90,6 +100,7 @@ class TradeSimulator:
         self.input_path = input_path
         self.instrument = instrument or Path(input_path).stem.upper()
         self.timeframe = timeframe
+        self._session_close_times: set[str] = _session_close_times(self.instrument)
         self.lookback = lookback
         self.chart_height = chart_height
         self.out_dir = Path(out_dir)
@@ -260,10 +271,9 @@ class TradeSimulator:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-    @staticmethod
-    def _is_session_close_bar(row: pd.Series) -> bool:
+    def _is_session_close_bar(self, row: pd.Series) -> bool:
         try:
-            return str(row.get("date", ""))[11:16] in {"14:45", "02:15"}
+            return str(row.get("date", ""))[11:16] in self._session_close_times
         except Exception:
             return False
 

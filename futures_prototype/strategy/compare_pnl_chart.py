@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 compare_pnl_chart.py — Overlay two trades files on a PnL comparison chart.
 
@@ -197,21 +198,21 @@ def main():
         lb = args.label_b or path_b.stem
         tick_a, tick_b = args.tick_a, args.tick_b
         col_a, col_b = BLUE, GREEN
-        out = Path(args.out) if args.out else HERE / "output/compare_custom.png"
+        out = Path(args.out) if args.out else HERE / "output/chart/compare_custom.png"
     elif args.mode == "sc_vs_ag":
-        path_a = HERE / "output/sc99_auto_trades.csv"
-        path_b = HERE / "output/ag99_auto_trades.csv"
+        path_a = HERE / "output/csv/sc99_auto_trades.csv"
+        path_b = HERE / "output/csv/ag99_auto_trades.csv"
         la, lb = "SC99 Auto", "AG99 Auto (Silver)"
         tick_a, tick_b = 0.1, 1.0
         col_a, col_b = BLUE, GOLD
-        out = HERE / "output/sc99_vs_ag99_compare.png"
+        out = HERE / "output/chart/sc99_vs_ag99_compare.png"
     else:  # manual_vs_auto
         path_a = HERE / "output/sim/SC99_73256598410d_trades.csv"
-        path_b = HERE / "output/sc99_auto_trades.csv"
+        path_b = HERE / "output/csv/sc99_auto_trades.csv"
         la, lb = "SC99 Manual", "SC99 Auto"
         tick_a, tick_b = 0.1, 0.1
         col_a, col_b = BLUE, GREEN
-        out = HERE / "output/sc99_compare_pnl.png"
+        out = HERE / "output/chart/sc99_compare_pnl.png"
 
     print(f"Loading A: {path_a}")
     print(f"Loading B: {path_b}")

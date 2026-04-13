@@ -16,6 +16,19 @@ from urllib.parse import parse_qs, urlparse
 from features_v2 import add_core_features, load_ohlcv
 from simulator import SimAction, SimPosition, SimTrade, _records_to_native, _to_native
 
+# Per-instrument night-session close times.
+# Day session always closes at 14:45.
+# Default night close: 02:15 (most instruments).
+# Exceptions: J99, ZC99 — night session ends at 23:00.
+_NIGHT_CLOSE_BY_INSTRUMENT: dict[str, str] = {
+    "J99":  "23:00",
+    "ZC99": "23:00",
+}
+
+def _session_close_times(instrument: str) -> set[str]:
+    night = _NIGHT_CLOSE_BY_INSTRUMENT.get(instrument.upper(), "02:15")
+    return {"14:45", night}
+
 
 @dataclass
 class ReplayState:
@@ -53,6 +66,7 @@ class ReplayStore:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.tick_size = float(tick_size) if float(tick_size) > 0 else 1.0
         self.position_size = max(1, int(position_size))
+        self.session_close_times: set[str] = _session_close_times(self.instrument)
         raw = load_ohlcv(input_path, timeframe=timeframe)
         self.df = add_core_features(raw)
         self.state_path = self.out_dir / f"{self.instrument}_{self.timeframe or 'unknown'}_state.json"
@@ -208,6 +222,7 @@ class ReplayStore:
             "total": len(self.df),
             "lookback": self.lookback,
             "tickSize": self.state.tick_size,
+            "sessionCloseTimes": sorted(self.session_close_times),
             "positionSize": self.state.position_size,
             "position": {
                 "side": self.state.position.side,
@@ -227,10 +242,9 @@ class ReplayStore:
             "stopTicks": self.stop_ticks,
         }
 
-    @staticmethod
-    def _is_session_close_bar(row: Any) -> bool:
+    def _is_session_close_bar(self, row: Any) -> bool:
         try:
-            return str(row.get("date", ""))[11:16] in {"14:45", "02:15"}
+            return str(row.get("date", ""))[11:16] in self.session_close_times
         except Exception:
             return False
 
@@ -488,7 +502,7 @@ class ReplayStore:
         if i <= 0:
             return None
         prev_hhmm = str(self.df.iloc[i - 1].get("date", ""))[11:16]
-        if prev_hhmm not in {"14:45", "02:15"}:
+        if prev_hhmm not in self.session_close_times:
             return None
         # Cancel all pending orders at session boundary.
         self._flag_order = None
@@ -620,7 +634,7 @@ function render(){ if(!state) return; const bars=state.windowBars; const w=cv.wi
  const showRangeLabel = step >= 22;
  ctx.strokeStyle='#2a3342'; ctx.fillStyle='#8aa0b4'; ctx.font='12px system-ui';
  for(let i=0;i<6;i++){ const p=top-(top-bot)*i/5; const y=px(p,bot,top,h,pad.t,pad.b); ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(w-pad.r,y); ctx.stroke(); ctx.fillText(p.toFixed(1),8,y+4); }
- bars.forEach((b,i)=>{ const x=pad.l+i*step+step/2; const yo=px(b.open,bot,top,h,pad.t,pad.b), yc=px(b.close,bot,top,h,pad.t,pad.b), yh=px(b.high,bot,top,h,pad.t,pad.b), yl=px(b.low,bot,top,h,pad.t,pad.b); const bull=b.close>=b.open; ctx.strokeStyle=bull?'#37d67a':'#ff5c5c'; ctx.fillStyle=bull?'#37d67a':'#ff5c5c'; ctx.beginPath(); ctx.moveTo(x,yh); ctx.lineTo(x,yl); ctx.stroke(); const topy=Math.min(yo,yc), bh=Math.max(2,Math.abs(yc-yo)); ctx.fillRect(x-bodyW/2,topy,bodyW,bh); const hhmm=(b.date||'').slice(11,16); if(hhmm==='14:45' || hhmm==='02:15'){ ctx.strokeStyle='#ffd54f'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; } if(i===bars.length-1){ ctx.strokeStyle='#4db3ff'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; }
+ const sessionCloseTimes=new Set(state.sessionCloseTimes||['14:45','02:15']); bars.forEach((b,i)=>{ const x=pad.l+i*step+step/2; const yo=px(b.open,bot,top,h,pad.t,pad.b), yc=px(b.close,bot,top,h,pad.t,pad.b), yh=px(b.high,bot,top,h,pad.t,pad.b), yl=px(b.low,bot,top,h,pad.t,pad.b); const bull=b.close>=b.open; ctx.strokeStyle=bull?'#37d67a':'#ff5c5c'; ctx.fillStyle=bull?'#37d67a':'#ff5c5c'; ctx.beginPath(); ctx.moveTo(x,yh); ctx.lineTo(x,yl); ctx.stroke(); const topy=Math.min(yo,yc), bh=Math.max(2,Math.abs(yc-yo)); ctx.fillRect(x-bodyW/2,topy,bodyW,bh); const hhmm=(b.date||'').slice(11,16); if(sessionCloseTimes.has(hhmm)){ ctx.strokeStyle='#ffd54f'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; } if(i===bars.length-1){ ctx.strokeStyle='#4db3ff'; ctx.lineWidth=2; ctx.strokeRect(x-bodyW/2-2,topy-2,bodyW+4,bh+4); ctx.lineWidth=1; }
    const isLast=i===bars.length-1; const inLast5=i>=bars.length-5; ctx.save(); ctx.textAlign='center';
    if(inLast5){ ctx.fillStyle=isLast?'#4db3ff':'#a9b7c6'; ctx.font=(isLast?'11':'10')+'px system-ui'; ctx.fillText(pfmt(b.high),x,Math.max(12,yh-5)); ctx.fillStyle=isLast?'#4db3ff':'#7a8a9a'; ctx.fillText(pfmt(b.low),x,Math.min(h-pad.b+13,yl+13)); }
    const rng=((b.high-b.low)/state.tickSize).toFixed(0); ctx.fillStyle=isLast?'#ffd700':'#556070'; ctx.font=(isLast?'bold 11':'9')+'px system-ui'; ctx.fillText(rng,x,Math.min(h-pad.b-2,yl+(inLast5?26:14))); ctx.restore();

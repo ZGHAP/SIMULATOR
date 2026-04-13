@@ -178,7 +178,7 @@ def main():
     ax_hr.set_xlabel("Hour", color=TXT, fontsize=9); ax_hr.set_ylabel("Ticks", color=TXT, fontsize=9)
     ax_hr.set_xticks(hg.index)
 
-    out = Path(__file__).resolve().parent.parent / f"output/{instrument.lower()}_pnl_analysis.png"
+    out = Path(__file__).resolve().parent.parent / f"output/chart/{instrument.lower()}_pnl_analysis.png"
     fig.savefig(out, dpi=140, facecolor=DARK, bbox_inches="tight")
     print(f"Saved → {out}")
     plt.show()

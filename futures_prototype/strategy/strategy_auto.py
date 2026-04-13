@@ -29,7 +29,17 @@ from features_v2 import add_core_features, load_ohlcv
 TICK_SIZE = 0.1
 STOP_TICKS = 20.0
 FLAG_OFFSET_TICKS = 2.0
-SESSION_CLOSE_TIMES = {"14:45", "02:15"}
+SESSION_CLOSE_TIMES = {"14:45", "02:15"}  # default; overridden per-instrument below
+
+# Per-instrument night-session close (mirrors simulator.py / web_replay_server.py)
+_NIGHT_CLOSE_BY_INSTRUMENT: dict[str, str] = {
+    "J99":  "23:00",
+    "ZC99": "23:00",
+}
+
+def _get_session_close_times(instrument: str) -> set[str]:
+    night = _NIGHT_CLOSE_BY_INSTRUMENT.get(instrument.upper(), "02:15")
+    return {"14:45", night}
 
 # Hours allowed to enter, and which sides are permitted
 HOUR_RULES: dict[int, set[str]] = {
@@ -52,8 +62,6 @@ BAD_DOW = set()             # no day of week filtered (Wednesday is weak but not
 # helpers
 # ---------------------------------------------------------------------------
 
-def _is_session_close(ts: pd.Timestamp) -> bool:
-    return f"{ts.hour:02d}:{ts.minute:02d}" in SESSION_CLOSE_TIMES
 
 
 def _session_key(ts: pd.Timestamp) -> str:
@@ -113,12 +121,47 @@ def _direction(df: pd.DataFrame, i: int, flag_idx: int) -> str | None:
 # main backtest
 # ---------------------------------------------------------------------------
 
+def _dynamic_stop(position: dict, tick_size: float, stop_dist: float, trail_ticks: float) -> float:
+    """
+    Return the current stop price.
+    Once best_price moves trail_ticks in our favour, the stop trails at trail_ticks
+    behind best_price (i.e. acts as break-even at exactly trail_ticks profit,
+    then locks in rising profit above that).
+    trail_ticks=0 means plain hard stop only.
+    """
+    ep   = position["entry_price"]
+    side = position["side"]
+    best = position["best_price"]
+    if trail_ticks <= 0:
+        return ep - stop_dist if side == 1 else ep + stop_dist
+    trail_dist = trail_ticks * tick_size
+    if side == 1:
+        hard = ep - stop_dist
+        if best >= ep + trail_dist:
+            return max(hard, best - trail_dist)
+        return hard
+    else:
+        hard = ep + stop_dist
+        if best <= ep - trail_dist:
+            return min(hard, best + trail_dist)
+        return hard
+
+
 def run_backtest(
     df: pd.DataFrame,
     tick_size: float = TICK_SIZE,
     stop_ticks: float = STOP_TICKS,
     flag_offset_ticks: float = FLAG_OFFSET_TICKS,
+    trail_ticks: float = 10.0,
+    session_close_times: set[str] | None = None,
 ) -> pd.DataFrame:
+    """
+    trail_ticks: once price moves this far in our favour, the stop trails
+                 at trail_ticks behind the peak.  Set 0 to disable trailing.
+    session_close_times: set of HH:MM strings when sessions close (default {"14:45","02:15"}).
+    """
+    if session_close_times is None:
+        session_close_times = SESSION_CLOSE_TIMES
     stop_dist = stop_ticks * tick_size
     flag_offset = flag_offset_ticks * tick_size
 
@@ -155,35 +198,51 @@ def run_backtest(
             chk_low  = bar_close if (is_entry_bar and side == 1  and bar_open < ep) else bar_low
             chk_high = bar_close if (is_entry_bar and side == -1 and bar_open > ep) else bar_high
 
+            # Current stop level (may have moved due to trailing)
+            cur_stop = _dynamic_stop(position, tick_size, stop_dist, trail_ticks)
+            at_hard_stop = (cur_stop <= ep - stop_dist + 1e-9) if side == 1 \
+                      else (cur_stop >= ep + stop_dist - 1e-9)
+            exit_reason_stop = "hard_stop" if at_hard_stop else "trail_stop"
+
             stopped = False
-            if side == 1 and chk_low <= ep - stop_dist:
-                xp = bar_open if bar_open < ep - stop_dist else ep - stop_dist
-                trades.append(_make_trade(position, i, ts, xp, "hard_stop", tick_size))
-                session_stopped[sess] = True
+            if side == 1 and chk_low <= cur_stop:
+                xp = bar_open if bar_open < cur_stop else cur_stop
+                trades.append(_make_trade(position, i, ts, xp, exit_reason_stop, tick_size))
+                if exit_reason_stop == "hard_stop":
+                    session_stopped[sess] = True
                 position = None
                 pending = None
                 stopped = True
 
-            elif side == -1 and chk_high >= ep + stop_dist:
-                xp = bar_open if bar_open > ep + stop_dist else ep + stop_dist
-                trades.append(_make_trade(position, i, ts, xp, "hard_stop", tick_size))
-                session_stopped[sess] = True
+            elif side == -1 and chk_high >= cur_stop:
+                xp = bar_open if bar_open > cur_stop else cur_stop
+                trades.append(_make_trade(position, i, ts, xp, exit_reason_stop, tick_size))
+                if exit_reason_stop == "hard_stop":
+                    session_stopped[sess] = True
                 position = None
                 pending = None
                 stopped = True
 
-            # Session flat
+            # Update best_price (peak) for next bar's trailing stop calc
             if not stopped:
-                prev_hhmm = f"{df.iloc[i-1]['date'].hour:02d}:{df.iloc[i-1]['date'].minute:02d}"
-                if prev_hhmm in SESSION_CLOSE_TIMES:
+                if side == 1:
+                    position["best_price"] = max(position["best_price"], bar_high)
+                else:
+                    position["best_price"] = min(position["best_price"], bar_low)
+
+            # Session flat — close AT the session close bar (not after)
+            # so there is never an overnight position
+            if not stopped:
+                curr_hhmm = f"{ts.hour:02d}:{ts.minute:02d}"
+                if curr_hhmm in session_close_times:
                     trades.append(_make_trade(position, i, ts, bar_close, "session_flat", tick_size))
                     position = None
                     pending = None
 
         # Cancel pending at session boundary
         if pending is not None:
-            prev_hhmm = f"{df.iloc[i-1]['date'].hour:02d}:{df.iloc[i-1]['date'].minute:02d}"
-            if prev_hhmm in SESSION_CLOSE_TIMES:
+            curr_hhmm = f"{ts.hour:02d}:{ts.minute:02d}"
+            if curr_hhmm in SESSION_CLOSE_TIMES:
                 pending = None
 
         # ----------------------------------------------------------------
@@ -194,12 +253,14 @@ def run_backtest(
             if pending["side"] == "long" and float(row["high"]) >= pending["trigger"]:
                 fill = bar_open if bar_open > pending["trigger"] else pending["trigger"]
                 position = {"side": 1, "entry_price": fill, "entry_time": ts,
-                            "entry_bar": i, "entry_reason": "flag_breakout_long"}
+                            "entry_bar": i, "entry_reason": "flag_breakout_long",
+                            "best_price": fill}
                 pending = None
             elif pending["side"] == "short" and float(row["low"]) <= pending["trigger"]:
                 fill = bar_open if bar_open < pending["trigger"] else pending["trigger"]
                 position = {"side": -1, "entry_price": fill, "entry_time": ts,
-                            "entry_bar": i, "entry_reason": "flag_breakout_short"}
+                            "entry_bar": i, "entry_reason": "flag_breakout_short",
+                            "best_price": fill}
                 pending = None
 
         # ----------------------------------------------------------------
@@ -382,6 +443,8 @@ def main() -> None:
     p.add_argument("--timeframe", default="15m")
     p.add_argument("--tick-size", type=float, default=0.1)
     p.add_argument("--stop-ticks", type=float, default=20.0)
+    p.add_argument("--trail-ticks", type=float, default=10.0,
+                   help="Trailing stop distance in ticks (0=hard stop only)")
     p.add_argument("--out", default=None, help="Save trades CSV to this path")
     args = p.parse_args()
 
@@ -390,7 +453,12 @@ def main() -> None:
     df = add_core_features(raw)
     print(f"Bars: {len(df)}  from {df['date'].iloc[0]} to {df['date'].iloc[-1]}")
 
-    trades = run_backtest(df, tick_size=args.tick_size, stop_ticks=args.stop_ticks)
+    instrument = _Path(args.input).stem.upper()
+    sc_times = _get_session_close_times(instrument)
+    print(f"Session close times: {sorted(sc_times)}")
+
+    trades = run_backtest(df, tick_size=args.tick_size, stop_ticks=args.stop_ticks,
+                          trail_ticks=args.trail_ticks, session_close_times=sc_times)
     report(trades)
 
     if args.out:
